@@ -1,0 +1,170 @@
+---
+title: "Basic workflow to work with ERA5land data with stars"
+author: "Carles Milà"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', message = F, warnings = F)
+```
+
+<style type="text/css">
+pre {
+  font-size: 11px
+}
+</style>
+
+## Getting ready
+
+This notebook contains a basic example of a R-based workflow for data management
+and analysis of ERA5land data with the stars package. The example data consist on
+2m and skin temperature ERA5land data for the study area comprised between 
+40ºN, 44ºN, 0ºE, 4ºE at an hourly resolution for January 2020. These can be easily
+downloaded from the [climate data store](https://cds.climate.copernicus.eu/#!/home) and 
+are also included in the repo.
+
+```{r libraries}
+library("stars")
+library("sf")
+library("readr")
+library("dplyr")
+library("viridis")
+library("ggplot2")
+```
+
+## Read data and stars 101
+
+We easily read ERA5land data using `read_stars`.
+
+```{r read ERA5}
+(airtemp <- read_stars("data/ERA5Land_2mtemp.grib"))
+(skintemp <- read_stars("data/ERA5Land_skintemp.grib"))
+```
+
+We use read our AOI that was stored as a rds object.
+
+```{r read AOI, fig.height=3}
+(catalonia <- read_rds("data/cat.rds"))
+plot(catalonia)
+```
+
+We can merge the two products and fix their names.
+
+```{r fix names}
+alltemp <- c(airtemp, skintemp)
+names(alltemp) <- gsub(".grib", "", names(alltemp))
+alltemp
+```
+
+We subset stars objects by using []. 1st is the attribute, next are the dimensions in order.
+
+```{r subset}
+alltemp[1] # subset attribute
+alltemp[, 1] # subset 1st dimension
+alltemp[,, 1] # subset 2nd dimension
+alltemp[,,, 1] # subset 3rd dimension
+```
+
+We now fix the time dimension with the correct times we downloaded. For these data, it's hourly for Jan 2020.
+
+```{r fix time}
+datetime_era5 <- seq.POSIXt(ISOdatetime(2020, 1, 1, 0, 0, 0),
+                            ISOdatetime(2020, 1, 31, 23, 0, 0), by="1 hour")
+dates_era5 <- seq.Date(as.Date("2020-01-01"), as.Date("2020-01-31"), "1 day")
+(alltemp <- st_set_dimensions(alltemp, 3, names="datetime", values=datetime_era5))
+```
+
+We can use the basic plotting capabilities of `stars` to check the data.
+
+```{r}
+plot(alltemp["ERA5Land_2mtemp",,,1:10], col=viridis(5))
+plot(alltemp["ERA5Land_skintemp",,,1:10], col=viridis(5))
+```
+
+
+## Band calculations 
+
+We can now make easy calculations within/between bands now. Here we do a ratio of air/skin temp.
+
+```{r band calcs}
+(alltemp <- mutate(alltemp, ratio = ERA5Land_2mtemp/ERA5Land_skintemp))
+plot(alltemp[3,,,1:10], col=viridis(5))
+```
+
+
+## Time aggregation and filtering
+
+Now we can easily calculate daily averages, we convert the time dimension to date and aggregate.
+
+```{r time aggregation}
+(alltemp <- aggregate(alltemp, "day", FUN=mean))
+(alltemp <- st_set_dimensions(alltemp, "time", names = "date", values = dates_era5))
+plot(alltemp[,1:10,,], col=viridis(5))
+```
+
+We can also filter by dimensions, for example date, if we want to:
+
+```{r}
+(alltemp_8days<- dplyr::filter(alltemp, date <= as.Date("2020-01-08")))
+```
+
+## Transforming CRS and cropping to AOI
+
+Now we transform from the geographic to our target CRS. To do that, we want to use bilinear interpolation using GDAL. To do that, we need to create a template first and then transform using GDAL one attribute at a time.
+
+```{r}
+alltemp_template <- st_warp(alltemp, crs = st_crs(catalonia)) # This uses nearest neighbour
+# When using GDAL, we can only transform one attribute at a time
+alltemp <- c(st_warp(alltemp["ERA5Land_2mtemp"], alltemp_template, method = "bilinear", use_gdal = T),
+             st_warp(alltemp["ERA5Land_skintemp"], alltemp_template, method = "bilinear", use_gdal = T),
+             st_warp(alltemp["ratio"], alltemp_template, method = "bilinear", use_gdal = T))
+# When using GDAL, names and time dimension info are lost, so we redefine them
+names(alltemp) <- names(alltemp_template)
+alltemp <- st_set_dimensions(alltemp, 3, names = "date", values = dates_era5)
+```
+
+Now we can crop to our study area.
+
+```{r}
+alltemp <- st_crop(alltemp, catalonia)
+```
+
+## Using ggplot2
+
+We can use stars objects in ggplot2 using `geom_stars` and use time dimension
+for faceting. Using `tmap` is also possible.
+
+```{r}
+ggplot() +
+  geom_stars(data=alltemp["ratio",,,1:8]) +
+  facet_wrap(~ date, nrow = 2) +
+  scale_fill_continuous(type = "viridis", na.value = "#FFFFFF00") +
+  xlab("") + ylab("") +
+  theme_bw() +
+  theme(aspect.ratio=1, axis.ticks = element_blank(), axis.text = element_blank()) 
+```
+
+## Extract pixel values
+
+To extract pixel values at certain points, the raster stars objects is converted to a stars vector object, which
+we can easily transform into a data frame.
+
+```{r}
+catalonia_centroid <- st_centroid(catalonia)
+(alltemp_pxls <- st_extract(alltemp, catalonia_centroid))
+alltemp_pxls <- as.data.frame(alltemp_pxls)
+head(alltemp_pxls)
+```
+
+## Zonal statistics
+
+If we want to calculate statistics by area, we'll use the `aggregate` function. Here we compute the mean value in our study area.
+
+```{r}
+(zonal_means <- aggregate(alltemp, catalonia, FUN=mean, na.rm=T))
+zonal_means <- as.data.frame(zonal_means)
+head(zonal_means)
+```
