@@ -3,7 +3,7 @@ title: "Basic workflow to work with ERA5land data with stars"
 author: "Carles Milà"
 date: "`r Sys.Date()`"
 output:
-  html_document:
+  pdf_document:
     toc: true
 ---
 
